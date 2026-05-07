@@ -17,6 +17,16 @@ PORT="${FCC_PORT:-8082}"
 BASE_URL="http://localhost:$PORT"
 AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-freecc}"
 LOG_FILE="/tmp/fcc-proxy.log"
+PID_FILE="/tmp/fcc-proxy.pid"
+
+bootstrap_path() {
+    if [[ -f /opt/homebrew/bin/brew ]]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [[ -f /usr/local/bin/brew ]]; then
+        eval "$(/usr/local/bin/brew shellenv)"
+    fi
+    [[ -d "$HOME/.local/bin" ]] && export PATH="$HOME/.local/bin:$PATH"
+}
 
 ensure_uv() {
     if command -v uv >/dev/null 2>&1; then
@@ -41,6 +51,7 @@ ensure_uv() {
 }
 
 start_proxy() {
+    bootstrap_path
     ensure_uv || return 1
 
     echo "🔧 Cleaning up port $PORT..."
@@ -56,8 +67,11 @@ start_proxy() {
 
     echo "🚀 Starting proxy server → $BASE_URL"
     cd "$SCRIPT_DIR"
-    uv run uvicorn server:app --host 0.0.0.0 --port "$PORT" > "$LOG_FILE" 2>&1 &
-    echo $! > /tmp/fcc-proxy.pid
+    nohup uv run uvicorn server:app --host 0.0.0.0 --port "$PORT" > "$LOG_FILE" 2>&1 < /dev/null &
+    echo $! > "$PID_FILE"
+
+    # Clean up PID file on script exit
+    trap 'rm -f "$PID_FILE"' EXIT
 
     # Wait for proxy to be ready
     for _ in $(seq 1 10); do
@@ -69,53 +83,44 @@ start_proxy() {
     done
 
     echo "❌ Proxy failed to start, check log: $LOG_FILE" >&2
-    # Clean up orphaned background process
-    if [[ -f /tmp/fcc-proxy.pid ]]; then
+    if [[ -f "$PID_FILE" ]]; then
         local failed_pid
-        failed_pid="$(cat /tmp/fcc-proxy.pid 2>/dev/null || true)"
+        failed_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
         if [[ -n "$failed_pid" ]] && kill -0 "$failed_pid" 2>/dev/null; then
             kill "$failed_pid" 2>/dev/null || true
-            rm -f /tmp/fcc-proxy.pid
         fi
+        rm -f "$PID_FILE"
     fi
     return 1
 }
 
 stop_proxy() {
-    local pids
-    local pid_file="/tmp/fcc-proxy.pid"
+    local saved_pid=""
 
     # Try PID file first for targeted kill
-    if [[ -f "$pid_file" ]]; then
-        local saved_pid
-        saved_pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ -f "$PID_FILE" ]]; then
+        saved_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
         if [[ -n "$saved_pid" ]] && kill -0 "$saved_pid" 2>/dev/null; then
             echo "🛑 Stopping proxy (PID: $saved_pid)..."
             kill "$saved_pid" 2>/dev/null || true
             sleep 2
-            if kill -0 "$saved_pid" 2>/dev/null; then
-                kill -9 "$saved_pid" 2>/dev/null || true
-                sleep 1
-            fi
-            rm -f "$pid_file"
+            kill -0 "$saved_pid" 2>/dev/null && kill -9 "$saved_pid" 2>/dev/null || true
+            rm -f "$PID_FILE"
             echo "✅ Stopped"
             return 0
-        else
-            rm -f "$pid_file"
         fi
+        rm -f "$PID_FILE"
     fi
 
     # Fall back to port-based lookup
+    local pids
     pids="$(lsof -ti ":$PORT" 2>/dev/null || true)"
     if [[ -n "$pids" ]]; then
         echo "🛑 Stopping proxy (PID: $(echo "$pids" | tr '\n' ' '))..."
         echo "$pids" | xargs kill 2>/dev/null || true
         sleep 2
         pids="$(lsof -ti ":$PORT" 2>/dev/null || true)"
-        if [[ -n "$pids" ]]; then
-            echo "$pids" | xargs kill -9 2>/dev/null || true
-            sleep 1
-        fi
+        [[ -n "$pids" ]] && echo "$pids" | xargs kill -9 2>/dev/null || true
         echo "✅ Stopped"
     else
         echo "ℹ️  Proxy is not running"
@@ -297,6 +302,7 @@ shortcut_menu() {
     echo "  2) Proxy + Claude Code — double-click to start all"
     echo "  3) Create both"
     echo ""
+    local choice
     read -r -p "Enter option [1/2/3]: " choice
 
     case "$choice" in
@@ -322,6 +328,7 @@ case "${1:-proxy}" in
         start_proxy
         ;;
     claude)
+        bootstrap_path
         if ! command -v claude >/dev/null 2>&1; then
             echo "❌ claude command not found, please install Claude Code" >&2
             exit 1

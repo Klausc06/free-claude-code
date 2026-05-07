@@ -68,12 +68,13 @@ function Start-Proxy {
 
     Write-Host "🚀 Starting proxy server → $BaseUrl"
     Set-Location $ScriptDir
-    Remove-Job -Name "FCCProxy" -ErrorAction SilentlyContinue
-    $job = Start-Job -Name "FCCProxy" -ScriptBlock {
-        param($dir, $port, $log)
-        Set-Location $dir
-        uv run uvicorn server:app --host 0.0.0.0 --port $port *>"$log"
-    } -ArgumentList $ScriptDir, $Port, $LogFile
+    $proc = Start-Process -FilePath "uv" `
+        -ArgumentList "run", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "$Port" `
+        -NoNewWindow `
+        -RedirectStandardOutput $LogFile `
+        -RedirectStandardError $LogFile `
+        -PassThru
+    $proc.Id | Out-File -FilePath "$env:TEMP\fcc-proxy.pid"
 
     # Wait for proxy to be ready
     for ($i = 0; $i -lt 10; $i++) {
