@@ -62,7 +62,17 @@ function Start-Proxy {
     Write-Host "🔧 Cleaning up port $Port ..."
     $existingPids = Get-ProcessIdByPort -Port $Port
     if ($existingPids) {
-        $existingPids | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+        foreach ($pid in $existingPids) {
+            $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+            if ($proc -and $proc.ProcessName -match '^(python|python3|uv|uvicorn)$') {
+                Write-Host "   Stopping existing $($proc.ProcessName) process (PID: $pid)..."
+                Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+            } else {
+                $name = if ($proc) { $proc.ProcessName } else { "unknown" }
+                Write-Host "   ⚠️  Port $Port occupied by $name (PID: $pid), not ours — aborting"
+                exit 1
+            }
+        }
         Start-Sleep -Seconds 1
     }
 
@@ -87,32 +97,42 @@ function Start-Proxy {
     }
 
     Write-Host "❌ Proxy failed to start, check log: $LogFile"
+    Remove-Item "$env:TEMP\fcc-proxy.pid" -ErrorAction SilentlyContinue
     exit 1
 }
 
 function Stop-Proxy {
     $procIds = Get-ProcessIdByPort -Port $Port
     if ($procIds) {
-        Write-Host "🛑 Stopping proxy (PID: $($procIds -join ','))..."
-        $procIds | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
-        Start-Sleep -Seconds 1
-        $remaining = Get-ProcessIdByPort -Port $Port
-        if ($remaining) {
-            Write-Host "⚠️  Process still bound to port $Port (PID: $($remaining -join ',')), forcing kill..."
-            $remaining | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+        foreach ($pid in $procIds) {
+            $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+            $name = if ($proc) { $proc.ProcessName } else { "unknown" }
+            if ($name -notmatch '^(python|python3|uv|uvicorn)$') {
+                Write-Host "⚠️  Port $Port occupied by $name (PID: $pid), not ours — skipping"
+                continue
+            }
+            Write-Host "🛑 Stopping proxy ($name PID: $pid)..."
+            Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 1
             $remaining = Get-ProcessIdByPort -Port $Port
-            if ($remaining) {
-                Write-Host "⚠️  Warning: process(es) may still be running: $($remaining -join ',')"
+            if ($remaining -contains $pid) {
+                Write-Host "⚠️  Forcing kill..."
+                Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 1
+                $remaining = Get-ProcessIdByPort -Port $Port
+                if ($remaining -contains $pid) {
+                    Write-Host "⚠️  Warning: process may still be running (PID: $pid)"
+                } else {
+                    Write-Host "✅ Stopped"
+                }
             } else {
                 Write-Host "✅ Stopped"
             }
-        } else {
-            Write-Host "✅ Stopped"
         }
     } else {
         Write-Host "ℹ️  Proxy is not running"
     }
+    Remove-Item "$env:TEMP\fcc-proxy.pid" -ErrorAction SilentlyContinue
 }
 
 function Show-Status {

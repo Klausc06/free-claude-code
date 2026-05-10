@@ -21,9 +21,9 @@ PID_FILE="/tmp/fcc-proxy.pid"
 
 bootstrap_path() {
     if [[ -f /opt/homebrew/bin/brew ]]; then
-        eval "$(/opt/homebrew/bin/brew shellenv)"
+        export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
     elif [[ -f /usr/local/bin/brew ]]; then
-        eval "$(/usr/local/bin/brew shellenv)"
+        export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
     fi
     [[ -d "$HOME/.local/bin" ]] && export PATH="$HOME/.local/bin:$PATH"
 }
@@ -58,20 +58,30 @@ start_proxy() {
     local pids
     pids="$(lsof -ti ":$PORT" 2>/dev/null || true)"
     if [ -n "$pids" ]; then
-        echo "$pids" | xargs kill 2>/dev/null || true
+        for pid in $pids; do
+            local cmd
+            cmd="$(ps -o comm= -p "$pid" 2>/dev/null || true)"
+            case "$cmd" in
+                uvicorn|python|python3|uv)
+                    echo "   Stopping existing $cmd process (PID: $pid)..."
+                    kill "$pid" 2>/dev/null || true
+                    ;;
+                *)
+                    echo "   ⚠️  Port $PORT occupied by $cmd (PID: $pid), not ours — aborting" >&2
+                    return 1
+                    ;;
+            esac
+        done
         sleep 2
-        pids="$(lsof -ti ":$PORT" 2>/dev/null || true)"
-        [ -n "$pids" ] && echo "$pids" | xargs kill -9 2>/dev/null || true
-        sleep 1
     fi
 
     echo "🚀 Starting proxy server → $BASE_URL"
     cd "$SCRIPT_DIR"
+
+    # Set trap before writing PID to avoid stale file on kill during window
+    trap 'rm -f "$PID_FILE"' EXIT
     nohup uv run uvicorn server:app --host 0.0.0.0 --port "$PORT" > "$LOG_FILE" 2>&1 < /dev/null &
     echo $! > "$PID_FILE"
-
-    # Clean up PID file on script exit
-    trap 'rm -f "$PID_FILE"' EXIT
 
     # Wait for proxy to be ready
     for _ in $(seq 1 10); do
@@ -101,26 +111,47 @@ stop_proxy() {
     if [[ -f "$PID_FILE" ]]; then
         saved_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
         if [[ -n "$saved_pid" ]] && kill -0 "$saved_pid" 2>/dev/null; then
-            echo "🛑 Stopping proxy (PID: $saved_pid)..."
-            kill "$saved_pid" 2>/dev/null || true
-            sleep 2
-            kill -0 "$saved_pid" 2>/dev/null && kill -9 "$saved_pid" 2>/dev/null || true
+            local cmd
+            cmd="$(ps -o comm= -p "$saved_pid" 2>/dev/null || true)"
+            case "$cmd" in
+                uvicorn|python|python3|uv)
+                    echo "🛑 Stopping proxy ($cmd PID: $saved_pid)..."
+                    kill "$saved_pid" 2>/dev/null || true
+                    sleep 2
+                    kill -0 "$saved_pid" 2>/dev/null && kill -9 "$saved_pid" 2>/dev/null || true
+                    rm -f "$PID_FILE"
+                    echo "✅ Stopped"
+                    return 0
+                    ;;
+                *)
+                    echo "⚠️  PID $saved_pid from stale PID file is $cmd, not ours — ignoring" >&2
+                    rm -f "$PID_FILE"
+                    ;;
+            esac
+        else
             rm -f "$PID_FILE"
-            echo "✅ Stopped"
-            return 0
         fi
-        rm -f "$PID_FILE"
     fi
 
     # Fall back to port-based lookup
     local pids
     pids="$(lsof -ti ":$PORT" 2>/dev/null || true)"
     if [[ -n "$pids" ]]; then
-        echo "🛑 Stopping proxy (PID: $(echo "$pids" | tr '\n' ' '))..."
-        echo "$pids" | xargs kill 2>/dev/null || true
-        sleep 2
-        pids="$(lsof -ti ":$PORT" 2>/dev/null || true)"
-        [[ -n "$pids" ]] && echo "$pids" | xargs kill -9 2>/dev/null || true
+        for pid in $pids; do
+            local cmd
+            cmd="$(ps -o comm= -p "$pid" 2>/dev/null || true)"
+            case "$cmd" in
+                uvicorn|python|python3|uv)
+                    echo "🛑 Stopping proxy ($cmd PID: $pid)..."
+                    kill "$pid" 2>/dev/null || true
+                    sleep 2
+                    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+                    ;;
+                *)
+                    echo "⚠️  Port $PORT occupied by $cmd (PID: $pid), not ours — skipping" >&2
+                    ;;
+            esac
+        done
         echo "✅ Stopped"
     else
         echo "ℹ️  Proxy is not running"
@@ -207,9 +238,9 @@ create_shortcut() {
 
 # Ensure tools are in PATH when launched from Finder (no shell profile)
 if [[ -f /opt/homebrew/bin/brew ]]; then
-    eval "$(/opt/homebrew/bin/brew shellenv)"
+    export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
 elif [[ -f /usr/local/bin/brew ]]; then
-    eval "$(/usr/local/bin/brew shellenv)"
+    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
 fi
 [[ -d "$HOME/.local/bin" ]] && export PATH="$HOME/.local/bin:$PATH"
 
